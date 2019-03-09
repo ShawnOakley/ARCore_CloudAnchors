@@ -12,6 +12,7 @@ import com.google.ar.core.Anchor;
 import com.google.ar.core.HitResult;
 import com.google.ar.core.Plane;
 import com.google.ar.sceneform.AnchorNode;
+import com.google.ar.sceneform.FrameTime;
 import com.google.ar.sceneform.rendering.ModelRenderable;
 import com.google.ar.sceneform.rendering.Renderable;
 import com.google.ar.sceneform.ux.ArFragment;
@@ -25,18 +26,22 @@ public class MainActivity extends AppCompatActivity {
     private enum AppAnchorState {
         NONE,
         HOSTING,
-        HOSTED
+        HOSTED,
+        RESOLVING,
+        RESOLVED
     }
 
     private AppAnchorState appAnchorState = AppAnchorState.NONE;
     private SnackbarHelper snackBarHelper = new SnackbarHelper();
+    private final StorageManager storageManager = new StorageManager();
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
         fragment = (CustomArFragment) getSupportFragmentManager().findFragmentById(R.id.sceneform_fragment);
-
+        fragment.getPlaneDiscoveryController().hide();
+        fragment.getArSceneView().getScene().setOnUpdateListener(this::onUpdateFrame);
         Button clearButton = findViewById(R.id.clear_button);
         clearButton.setOnClickListener(new View.OnClickListener(){
             @Override
@@ -47,15 +52,16 @@ public class MainActivity extends AppCompatActivity {
 
         fragment.setOnTapArPlaneListener(
                 (HitResult hitResult, Plane plane, MotionEvent motionEvent) -> {
-                    if (plane.getType() != Plane.Type.HORIZONTAL_UPWARD_FACING) {
+                    if (plane.getType() != Plane.Type.HORIZONTAL_UPWARD_FACING ||
+                        appAnchorState != AppAnchorState.NONE) {
                         return;
                     }
 
                     Anchor newAnchor = fragment.getArSceneView().getSession().hostCloudAnchor(hitResult.createAnchor());
+                    setCloudAnchor(newAnchor);
 
                     appAnchorState = AppAnchorState.HOSTING;
                     snackBarHelper.showMessage(this, "Now hosting anchor...");
-                    setCloudAnchor(newAnchor);
 
                     placeObject(fragment, cloudAnchor, Uri.parse("Fox.sfb"));
                 }
@@ -68,7 +74,63 @@ public class MainActivity extends AppCompatActivity {
         }
 
         cloudAnchor = newAnchor;
+        appAnchorState = AppAnchorState.NONE;
+        snackBarHelper.hide(this);
     }
+
+    Button resolveButton = findViewById(R.id.resolve_button);
+    resolveButton.setOnClickListener(new View.OnClickListener() {
+       @Override
+       public void onClick(View view) {
+           if (cloudAnchor != null){
+               snackBarHelper.showMessageWithDismiss(getParent(), "Please clear Anchor");
+               return;
+           }
+           ResolveDialogFragment dialog = new ResolveDialogFragment();
+           dialog.setOkListener(MainActivity.this::onResolveOkPressed);
+           dialog.show(getSupportFragmentManager(), "Resolve");
+        }
+    });
+
+    private void onResolveOkPressed(String dialogValue){
+        int shortCode = Integer.parseInt(dialogValue);
+        String cloudAnchorId = storageManager.getCloudAnchorID(this, shortCode);
+        Anchor resolvedAnchor = fragment.getArSceneView().getSession().resolveCloudAnchor(cloudAnchorId);
+        setCloudAnchor(resolvedAnchor);
+        placeObject(fragment, cloudAnchor, Uri.parse("Fox.sfb"));
+        snackBarHelper.showMessage(this, "Now resolving anchor...");
+        appAnchorState = AppAnchorState.RESOLVING;
+    }
+
+    private void onUpdateFrame(FrameTime frameTime) {
+        checkUpdateAnchor();
+    }
+
+    private synchronized void checkUpdateAnchor(){
+        if (appAnchorState != AppAnchorState.HOSTING && appAnchorState != AppAnchorState.RESOLVING) {
+            return;
+        }
+        Anchor.CloudAnchorState cloudState = cloudAnchor.getCloudAnchorState();
+        if (appAnchorState == AppAnchorState.HOSTING) {
+            if(cloudState.isError()){
+                snackBarHelper.showMessageWithDismiss(this, "Error");
+                appAnchorState = AppAnchorState.NONE;
+            } else if (cloudState == Anchor.CloudAnchorState.SUCCESS) {
+                int shortCode = storageManager.nextShortCode(this);
+                storageManager.storeUsingShortCode(this, shortCode, cloudAnchor.getCloudAnchorId());
+                snackBarHelper.showMessageWithDismiss(this, "Anchor hosted! Cloud Short Code: " + shortCode);
+                appAnchorState = AppAnchorState.HOSTED;
+            }
+        } else if (appAnchorState == AppAnchorState.RESOLVING) {
+            if(cloudState.isError()){
+                snackBarHelper.showMessageWithDismiss(this, "Error");
+                appAnchorState = AppAnchorState.NONE;
+            } else if (cloudState == Anchor.CloudAnchorState.SUCCESS) {
+                appAnchorState = AppAnchorState.RESOLVED;
+            }
+        }
+
+    };
 
     private void placeObject(ArFragment fragment, Anchor anchor, Uri model){
         ModelRenderable.builder()
